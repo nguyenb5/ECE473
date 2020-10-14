@@ -1,0 +1,135 @@
+Inclass Exercise (makefiles)
+R. Traylor 9.1.2020
+
+This exercise will help you understand how makefiles work and how
+they can make your life much easier as your project gets bigger.
+The bottom line is that the more automation that we can employ
+we can be more efficient with time and avoid mistakes.
+
+A well written makefile can be reused with few changes if you
+think ahead. We will be using a makefile to build all our projects
+all the makefiles will look very much the same.
+
+Makefiles are the underlying mechanism in most IDEs but are hidden
+from your view. If the tool builds them wrong, you are toast. If you
+write your own and understand how it works, you stay in control.
+
+First, download the tarfile:
+  wget http://web.engr.oregonstate.edu/~traylor/ece473/inclass_exercises/makefiles/makefiles2/inclass_exercise.tar
+  OR
+  curl -o inclass_exercise.tar http://web.engr.oregonstate.edu/~traylor/ece473/inclass_exercises/makefiles/makefiles2/inclass_exercise.tar
+Untar it into a temporary working area.
+  tar xvf inclass_exercise.tar
+
+Answer the questions below on the blank lines. Keep the questions intact 
+by copying and editing your local copy of this file.
+
+Fill in the blanks and submit this just this file via Canvas  
+by the end of day (5pm).
+
+All the component files that constitute the executable "edit" will be in 
+the directory as well as the makefile. In the directions that follow,
+the default c compiler in Linux, "cc", is used instead of the c compiler 
+for the AVR "avr-gcc". The difference is of no consequence.
+
+Using the given makefile..., 
+
+1. List the series of instructions that would be executed and output to 
+   the screen by make if the makefile had never been run to create the 
+   executable "edit". On each line tell what is happening. If you are 
+   not sure what is being done, type "make clean", followed by "make". 
+   The commands executed by make will be transcripted to the shell.
+
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+
+2. After successfully doing a "make", i.e., all the files are up to date,
+   suppose that command.h was edited. If make is executed again, what
+   commands would be executed?  
+   
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+   __________________________________________________________________
+
+   You can check your answer easily. First, check the timestamp on all 
+   your .c or .h files using "ls" with "time-style" modified to return 
+   the time stamp down to the second or fraction of a second.
+     ls -l --full-time 
+   Note that all the *.o files have a newer (later) timestamp than the 
+   .c or .h files. This tells "make" that the .o files are up to date. 
+   Also note all the *.o files were created in the same second.
+
+   Now type "touch command.h" to modify the time stamp on command.h.
+   Execute the "ls" command again and note the different timestamp on
+   command.h. Since command.h is newer than the files that depend on
+   it (files.o, command.o, kbd.o), those files must be recreated by
+   compiling the corresponding *.c files.
+
+   So when make is run again, we should see the files that depended
+   on command.h recompiled, followed by the link.
+
+3. Now suppose that all the files were up to date and then utils.c was 
+   touched and make executed. What commands would be executed by make?
+
+   __________________________________________________________________
+   __________________________________________________________________
+
+4. Replace the hard tab in the second line of the rule:
+   edit : $(OBJECTS)
+         cc -o edit $(OBJECTS)
+   with 8 spaces instead. Then run make. What does make report?
+
+   __________________________________________________________________
+
+  You might want to remember this result when you forget to use tabs!
+  Fix the error and rerun make. What does make then report?
+
+   __________________________________________________________________
+
+5. How many files do you see now in your directory?
+
+   __________
+
+   The easy to check this is: "ls | wc -l"
+   This lists the files, pipes the result to "word count" and word count
+   reports the the number of lines, words, and bytes present. The -l
+   switch on wc has it only report lines.
+
+   Type make clean.  You can see what the pseudo target "clean" does.
+   Now, how many files are there in your directory?
+
+   ____________________
+
+   What types of files were removed? Look at the transcript for hints.
+
+   __________________________________________________________________
+
+
+
+-------- The given Makefile is shown below ----------------------------
+
+OBJECTS = main.o kbd.o command.o display.o \
+          insert.o search.o files.o utils.o
+     
+edit : $(OBJECTS)
+	cc -o edit $(OBJECTS)
+     
+main.o    : defs.h
+files.o   : defs.h buffer.h command.h
+command.o : defs.h command.h
+kbd.o     : defs.h command.h
+display.o : defs.h buffer.h
+insert.o  : defs.h buffer.h
+search.o  : defs.h buffer.h
+utils.o   : defs.h
+clean     :
+	rm edit $(OBJECTS)
+
