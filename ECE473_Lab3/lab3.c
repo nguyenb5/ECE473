@@ -45,6 +45,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
+uint8_t previousData;
 /***********************************************************************/
 //                            spi_init                               
 //Initalizes the SPI port on the mega128. 
@@ -52,9 +53,8 @@
 //MSB first, SPI interrupts are disabled. 
 //We will poll SPIF bit in SPSR to check SPI send completion
 /***********************************************************************/
-void spi_init(void){
 
-  DDRB  |=   0x07;		 //Turn on SS, MOSI, SCLK
+void spi_init(void){
 
   SPCR  |=  (1<<SPE) | (1<<MSTR);  //enable SPI, master mode 
 
@@ -78,6 +78,14 @@ void tcnt0_init(void){
 
 }
 
+void config_IO(void){
+  DDRB |= 0x07;		 //Turn on SS, MOSI, SCLK
+  
+  DDRA = 0xFF;		//PortA to all output for 4 digits LED
+  DDRB |= 0x80;	//PortB bit4->7 to control 4 digits LED
+  DDRE |= 0xC0;  	//PortE bit6,7 for encoder CLK Inhibit, SH/LD!
+}
+
 /*************************************************************************/
 //                           timer/counter0 ISR                          
 //When the TCNT0 overflow interrupt occurs, the count_7ms variable is    
@@ -94,20 +102,18 @@ ISR(TIMER0_OVF_vect){
 
   count_7ms++;                //increment count every 7.8125 ms
  
-  if ((count_7ms % 64 )==0){ // how many interrupts equals one half second? 
-
-    SPDR = display_count;              	//send to bar graph display 
-
+	PORTE &= ~(0x40);
+	PORTE |=   0x80 ;
+    SPDR = previousData;              	//send to bar graph display 
     while(bit_is_clear(SPSR, SPIF)){};               //wait till data sent out (a while loop)
+    previousData = SPDR;
 
+	PORTE |=   0x40;
+	PORTE &= ~(0x80);
     PORTB |= 0x01;         	//HC595 output reg - rising edge...
 
     PORTB &= ~0x01;          	//and falling edge
 
-    display_count = (display_count << 1); //shift display bit for next time 
-  } //if
-
-  if (display_count == 0x80){display_count=1;} //back to 1st position
 }
 
 /***********************************************************************/
@@ -115,6 +121,7 @@ ISR(TIMER0_OVF_vect){
 /***********************************************************************/
 int main(){     
 tcnt0_init();  //initalize counter timer zero
+config_IO();
 spi_init();    //initalize SPI port
 sei();         //enable interrupts before entering loop
 while(1){}     //empty main while loop
