@@ -1,13 +1,20 @@
 // Expected Connections:
 // Bargraph board           Mega128 board 
 // --------------      ----------------------    
-//     reglck            PORTB bit 0 (ss_n)                      
+//     reglck            PORTD bit 2                     
 //     srclk             PORTB bit 1 (sclk)
 //     sdin              PORTB bit 2 (mosi)
 //     oe_n                   ground
 //     gnd2                   ground
 //     vdd2                     vcc
 //     sd_out               no connect
+
+// Expected Connections:
+// Encoder board
+// 	SH/LD		PORTE bit 6
+// 	CLK_INH	PORTE bit 7
+//	SCK		PORTB bit 1 (sclk)
+//	SER_OUT	PORTB bit 3 (miso)
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
@@ -23,8 +30,8 @@ volatile uint8_t newEncodeData;
 volatile uint16_t display_number; 
 volatile uint8_t stateEncoder1;
 volatile uint8_t stateEncoder2;
-volatile bool button0_flag = 0;
-volatile bool button1_flag = 0;
+bool button_flag[2] = {0};
+
 volatile uint8_t inc_dec;
 int i;	//dummy var
 /***********************************************************************/
@@ -73,6 +80,7 @@ void config_IO(void){
 
 /***********************************************************************/
 //			bargraphLatch
+// 	latching the data to the output of the bargraph
 /***********************************************************************/
 void bargraphLatch(void){
 	PORTD |= 0x04;         	//HC595 output reg - rising edge...
@@ -211,16 +219,17 @@ int dirOfEncoder(void){
 }
 
 /***********************************************************************/
-//                                processIncDec                                 
+//                                processIncDec 
+//	Take in button flag and set the increment/decrement
+//	NO button, BOTH button INC/DEC = 0; button 0 only 2, button 1 ONLY 4                                
 /***********************************************************************/
 void processIncDec(){
-
-	if(button0_flag == 1)
-		inc_dec = 2;
-	else if(button1_flag == 1)
-		inc_dec = 4;
-	else if(button0_flag == 1 & button1_flag == 1)
+	if((button_flag[0] == 1) && (button_flag[1] == 1))
 		inc_dec = 0;
+	else if(button_flag[0] == 1)
+		inc_dec = 2;
+	else if(button_flag[1] == 1)
+		inc_dec = 4;
 	else 	inc_dec = 1;
 }
 
@@ -229,7 +238,7 @@ void processIncDec(){
 /***********************************************************************/
 int main(){     
 tcnt0_init();  //initalize counter timer zero
-config_IO();
+config_IO();	//initalize I/O (only do DDRA, DDRB, DDRB, DDRE)
 spi_init();    //initalize SPI port
 sei();         //enable interrupts before entering loop
 
@@ -238,29 +247,29 @@ int flag=0;		//Flag for checking which button is pressed
 
 while(1){
 	//Update display
-	
 	update7Segment(display_number);
 		
-	//Check Button
+	//Check Button, update button status
+	for(i=0;i<2;i++){
+		if(isButtonPressed(i)) button_flag[i] = !button_flag[i];
+	}
+	
+	processIncDec();	//Convert button data -> increment/decrement
+	//Display buttons status on Bargraph
+	toBarGraph =  button_flag[0] | button_flag[1] << 1;
 
-	if(isButtonPressed(0) == 1) {button0_flag = !button0_flag;}
+	//Actually increment or decrement the display number
+	flag =  dirOfEncoder();
+	if(flag == 1) 	{
+		display_number += inc_dec;
+		}
+	else if(flag == -1)	{
+		display_number -= inc_dec;
+		}
+		
+	if(display_number >= 1024)	
+		display_number = (display_number % 1024);	//Max 1023, wrap around
 	
-	if(isButtonPressed(1) == 1) {button1_flag = !button1_flag;}
-	
-	processIncDec();
-	toBarGraph =  button0_flag | button1_flag << 1;
-
-	
-		flag =  dirOfEncoder();
-		if(flag == 1) 		{
-			display_number += inc_dec;
-			}
-		else if(flag == -1)	{
-			display_number -= inc_dec;
-			}
-	
-		if(display_number >= 1024)	display_number = (display_number % 1024);		//Max 1023, wrap around
-	
-}     //empty main while loop
+}
 
 } //main
