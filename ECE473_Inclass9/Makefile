@@ -1,12 +1,13 @@
-PRG            = siren_skel
+PRG            = siren
 OBJ            = $(PRG).o
 MCU_TARGET     = atmega128
-F_CPU          = 16000000UL
+OPTIMIZE       = -O2    # options are 1, 2, 3, s
 DEFS           =
 LIBS           =
 CC             = avr-gcc
-OPTIMIZE       = -O2    # options are 1, 2, 3, s
-#OPTIMIZE      = -Os    # options are 1, 2, 3, s
+F_CPU          = 16000000UL
+
+
 # Override is only needed by avr-lib build system.
 
 override CFLAGS        = -g -Wall $(OPTIMIZE) -mmcu=$(MCU_TARGET) $(DEFS) -DF_CPU=$(F_CPU)
@@ -22,10 +23,10 @@ $(PRG).elf: $(OBJ)
 
 clean: 
 	rm -rf *.o $(PRG).elf *.eps *.png *.pdf *.bak 
-	rm -rf *.lst *.map $(EXTRA_CLEAN_FILES) *~
+	rm -rf *.bin *.hex *.srec *.lst *.map $(EXTRA_CLEAN_FILES) *~
 
 program: $(PRG).hex
-	avrdude -p m128 -c usbasp  -e -U flash:w:$(PRG).hex 
+	avrdude -p m128 -c usbasp -e -U flash:w:$(PRG).hex 
 
 lst:  $(PRG).lst
 

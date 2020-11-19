@@ -16,7 +16,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
-ISR(                                ) {
+ISR(TIMER3_COMPA_vect) {
 //The OCR1A values that work well are from 10000 to 65000
 //the values should increment and decrement by about 64
 //
@@ -36,34 +36,34 @@ ISR(                                ) {
 
 int main(){
 
-  DDRB   |=                          //set port B bit five and seven as outputs
+  DDRB   |= (1<<PB5) | (1<<PB7);      //set port B bit five and seven as outputs
 
 //setup TCNT1
 
-  TCCR1A |=                          //CTC mode with output pin on 
+  TCCR1A |= (1<<COM1A0);   			//CTC mode with output pin on 
 
-  TCCR1B |=                          //use OCR1A as source for TOP, use clk/1
+  TCCR1B |= (1<<CS10) | (1<<WGM12);        //use OCR1A as source for TOP, use clk/1
 
-  TCCR1C =                           //no forced compare 
+  TCCR1C = 0x00;                          //no forced compare 
 
 //setup TCNT3
 // siren update frequency = (16,000,000)/(OCR3A) ~ set to about 1000 cycles/sec
 
-  TCCR3A =                           //CTC mode, output pin does not toggle 
+  TCCR3A |= (1<<COM3A1)|(1<<COM3A0);      //CTC mode, output pin does not toggle 
 
-  TCCR3B =                           //no prescaling      
+  TCCR3B |= (1<<WGM32)|(1<<CS30);         //no prescaling      
 
-  TCCR3C =                           //no forced compare 
+  TCCR3C = 0x00;                     //no forced compare 
 
-  OCR3A =                            //pick a speed from 0x1000 to 0xF000
+  OCR3A = 0x4055;                    //pick a speed from 0x1000 to 0xF000
 
-  ETIMSK =                           //enable timer 3 interrupt on OCIE3A
- 
+  ETIMSK = (1<<OCIE3A);                          //enable timer 3 interrupt on OCIE3A
+  //ETIFR =    (1<<OCF3A);
  //TCNT2 setup for providing the volume control
  //fast PWM mode, TOP=0xFF, clear on match, clk/128
  //output is on PORTB bit 7 
  TCCR2 =  (1<<WGM21) | (1<<WGM20) | (1<<COM21) | (1<<COM20) | (1<<CS20) | (1<<CS21);
- OCR2  = 0x90;  //set to adjust volume control 
+ OCR2  = 0xE0;  //set to adjust volume control 
 
   sei();     //set GIE to enable interrupts
   while(1){} //do forever
