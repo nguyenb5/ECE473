@@ -45,7 +45,7 @@ volatile uint8_t toBarGraph = 1;
 volatile uint32_t current_second; 
 volatile uint32_t alarm_display_second;
 volatile uint32_t alarm_time;
-volatile bool clk_mode;
+volatile bool clk_mode = 1;		//default 12h style
 volatile uint8_t stateEncoder1;
 volatile uint8_t stateEncoder2;
 volatile uint8_t dot;
@@ -94,17 +94,17 @@ void spi_init(void){
  DDRF  |= 0x08;  //port F bit 3 is enabling for LCD
  PORTF &= 0xF7;  //port F bit 3 is initially low
 
- DDRB  |= 0x07;  //Turn on SS_n, MOSI, SCLK. SS_n must be out for MSTR mode
-//see: /$install_path/avr/include/avr/iom1z28.h for bit definitions   
+ DDRB  |= 0x07;  //Turn on SS_n, MOSI, SCLK. SS_n must be out for MSTR mode  
 
- //Master mode, Clock=clk/4, Cycle half phase, Low polarity, MSB first
+ //Master mode, Clock=clk/4, Cycle half phase, MSB first
  SPCR=(1<<SPE) | (1<<MSTR); //enable SPI, clk low initially, rising edge sample
  SPSR=(1<<SPI2X);           //SPI at 2x speed (8 MHz)  
 }
 
-/*
-
-*/
+/***********************************************************************/
+//			clock_config_init
+//	Set up Timer0, Timer1, Timer2, Timer3
+/***********************************************************************/
 void clock_config_init(void){
 	
 	/* Config timer 0 to keep track of seconds*/
@@ -134,7 +134,7 @@ void clock_config_init(void){
   	TCCR3A |= (1<<COM3A1) | (1<<WGM31);
   	TCCR3B |= (1<<WGM32) | (1<<CS31);
   	TCCR3C |= 0x00;	//No forced compare	
-  	OCR3A   = 512>>1;	//2^9 = 512, shift one bit to divide by 2
+  	OCR3A   = 1;		//Audio shutup at the begining
 	//Let's go to Thai Chili
 	
 }
@@ -150,6 +150,10 @@ void IO_config_init(void){
 	
 }
 
+/***********************************************************************/
+//			ADC_init
+//	Set up portF bit 7 and ADC reg for Cd_S light meter
+/***********************************************************************/
 void ADC_init(void){
 	DDRF  &= ~(_BV(DDF7)); 	//make port F bit 7 the ADC input  
 	PORTF &= ~(_BV(PF7));  		//port F bit 7 pullups must be off
@@ -159,12 +163,24 @@ void ADC_init(void){
 	ADCSRA = (1 << ADEN) | (1<<ADPS2) | (1<<ADPS1) | (1<<ADPS0) | (1<<ADIE); //ADC enabled, don't start yet, enable interrupt on conversion
 }
 
+/***********************************************************************/
+//			CdSReadStart
+//			Start ADC conversion
+/***********************************************************************/
 void CdSReadStart(void){
 	ADCSRA |= (1 << ADSC); 			//poke the ADSC bit and start conversion
 }
 
+/***********************************************************************/
+//			setBrightness
+//	Adjust brightness changing PWM duty ratio
+/***********************************************************************/
 void setBrightness(uint8_t value){OCR2 = value;}	//Dimmest: OCR2 = 0xE1; Brightest OCR2 = 0x15;
 
+/***********************************************************************/
+//			processLEDbrightness
+//	Adjust brightness index, then update the brightness for the LED display
+/***********************************************************************/
 void processLEDbrightness(uint16_t ADC_value){
 	static uint8_t brightnessIndex;
 	if(brightnessIndex < (ADC_value/100)) //higher index, brighter
@@ -176,19 +192,22 @@ void processLEDbrightness(uint16_t ADC_value){
 }
 
 /* BEGIN INTERRUPT ROUTINE LIST*/
-// Generating 1 second interrupt
+//Interrupt for ADC conversion
 ISR(ADC_vect){
   lastADCread = ADC; 	//Range from 50 to 1020 tested
 }
 
+// This timer update:
+//	Colon in LED display
+//	Bargraph AM/PM motion
+//	Start ADC read
+//	Change LED display brightness(changing duty ratio)
 ISR(TIMER0_OVF_vect){
 	static uint8_t count_7ms=0;  //hold value of count between interrupts
 	count_7ms++;                 //extend counter
 	//toggle PB0 each time this happens
 	if((count_7ms % 128) == 0) {// If one second doing something
 		current_second++;
-		  clear_display();
-  			cursor_home();
 		// blinking the mid colon everyone sec
 		if(bit_is_set(dot,0)) { //if dot is 0bx11
 			dot ^= (1UL << 0); // blinking the mid colon
@@ -217,7 +236,8 @@ ISR(TIMER1_COMPA_vect){
 
 /***********************************************************************/
 //			dirOfEncoder
-//	Return: clockwise 1, counter-clockwise -1, no turn 0
+//	Return: clockwise 1, counter-clockwise -1 for left encoder
+//	Return: clockwise 2, counter-clockwise -2 for right encoder
 /***********************************************************************/
 int dirOfEncoder(void){
 	//extract k bits from p position: https://www.geeksforgeeks.org/extract-k-bits-given-position-number/
@@ -259,6 +279,11 @@ int dirOfEncoder(void){
 	return 0;
 }
 
+/***********************************************************************/
+//			updateSPI
+//	Return: void
+//	Send new data to bargraph and retrieve data from encoder
+/***********************************************************************/
 void updateSPI(void){
 	/* Encoder code */
 	//Flipping bits for CLK_INH and SH/LD for encoder
@@ -349,7 +374,11 @@ void update7Segment(uint16_t number, uint8_t dot){
 }
 
 
-//This functional is computational intensive, major optimization can be done here
+/***********************************************************************/
+//			second_to_min_hour
+//	Return: hour and minute in decimal format for LED display
+//	MAJOR disadvantage: computationally intensive
+/***********************************************************************/
 uint16_t second_to_min_hour(uint32_t second, bool mode){
 	uint8_t hour_tenth;
 	uint8_t hour_oneth;
@@ -454,7 +483,6 @@ void snoozing(void){
 int main() {
 	int flag=0;
 	char lcd_final0[32] = "Alarm is armed                  ";
-	char lcd_final1[32] = "I am in case 1                  ";
 	
 	//Setup
 	spi_init();
@@ -465,25 +493,17 @@ int main() {
 	lcd_init(); 
 	clear_display();
 	sei();			//Enable all interrupts
+	
 	/*Default value when start up*/
 	alarm_display_second = 43200;	//Alarm time setting will display noon
-	
-	//Loop
-	
-	
-	/* Testing code */
 	current_second = 0;
-	dot = 0b011; // turn on the 4_LED_7_seg mid colon
-	clk_mode = 1;
 
-	/* Testing code */
-	OCR3A = 0;
 	while(1){
 		
 		updateSPI();	//Read encoder value + update bar graph to indicate am or pm
 		if(isAlarmSet) refresh_lcd(lcd_final0);
+		else		clear_display();
 		
-
 		switch(state){	
 			case 0: //State 0 Normal time with/without Alarm
 				update7Segment(second_to_min_hour(current_second, clk_mode), dot); // turn on L1 and L2 also
@@ -509,8 +529,5 @@ int main() {
 			if(isButtonPressed(i)) processButtomNumber(i);
 		}
 		
-
-		
-
   } //while
 	} //main
