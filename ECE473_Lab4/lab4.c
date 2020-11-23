@@ -32,19 +32,32 @@
 #include <stdbool.h>
 #include "hd44780.h"
 
+#define RINGING_TIME 60
+#define SNOOZE_TIME 10 
+
 uint8_t indexToLed[11] = {0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80,
 			0x98, 0xFF};
 uint8_t brightness[10] = {0xD0, 0xD0, 0xB5, 0xA1, 0x8D, 0x79, 0x65, 0x51, 0x3D, 0x15, 0x15};
 
 /** Global Vars **/
 volatile uint8_t newEncodeData;
+volatile uint8_t toBarGraph = 1;
 volatile uint32_t current_second; 
+volatile uint32_t alarm_display_second;
+volatile uint32_t alarm_time;
 volatile bool clk_mode;
 volatile uint8_t stateEncoder1;
 volatile uint8_t stateEncoder2;
 volatile uint8_t dot;
 volatile uint16_t lastADCread = 217; 
 bool button_flag[2] = {0};
+uint8_t state;
+bool isAlarmSet;
+bool isAM;
+bool isRinging = 0;
+bool isSnoozing = 0;
+
+
 
 volatile uint8_t inc_dec;
 int i;	//dummy var
@@ -65,10 +78,16 @@ void setBrightness(uint8_t value);
 //Encoder stuff
 int dirOfEncoder(void);
 void updateSPI(void);
+void bargraphLatch(void);
 //LED stuff
 void processLEDbrightness(uint16_t ADC_value);
 void update7Segment(uint16_t number, uint8_t dot);
 uint16_t second_to_min_hour(uint32_t second, bool mode);
+//Button stuff
+uint8_t isButtonPressed(uint8_t button);
+void processButton(void);
+//Audio stuff
+void checkAlarm(void);
 
 void spi_init(void){
 	/* Run this code before attempting to write to the LCD.*/
@@ -87,8 +106,21 @@ void spi_init(void){
 
 */
 void clock_config_init(void){
-
-	/* Timer2 OC2 PWM for PB7 */
+	
+	/* Config timer 0 to keep track of seconds*/
+	TCCR0 |= (1<<CS00);  	//normal mode, no prescaling
+	ASSR  |= (1<<AS0);   	//use ext oscillator
+	TIMSK |= (1<<TOIE0); 	//allow interrupts on overflow
+	
+	/* Config timer 1 for sounds generation*/
+	TCCR1A |= 0x00;	//CTC mode, discontected ports
+	TCCR1B |= (1<<WGM12) | (1<<CS10); //CTC, no prescaler
+	TCCR1C |= 0x00;	//No forced compare
+	OCR1A   = 20000;	//Frequency setting
+	// Tried CompareOutputA but it will break the LED display
+	TIMSK  |= (1<<OCIE1A);	//Enable interrupt
+	
+	/* Timer2 OC2 PWM for LED display PB7 */
 	//Enable fast PWM, non-inverting output mode
   	//64 prescaler (goal is 967Hz)
   	TCCR2 = (1<<WGM21) | (1<<WGM20) | (1<<COM21) | (1<<CS21) | (1<<CS20);
@@ -96,16 +128,19 @@ void clock_config_init(void){
   	//OCR2 set the BOTTOM. Output flip when pass BOTTOM and TOP
   	OCR2 = 0xE1; //Half brightness at start up
 	
-	/* Config timer 0 to keep track of seconds*/
-	TCCR0 |= (1<<CS00);  //normal mode, no prescaling
-	ASSR  |= (1<<AS0);   //use ext oscillator
-	TIMSK |= (1<<TOIE0); //allow interrupts on overflow
+	/* Config timer 3 for volume control */
+	// 9 bits, fast-PWM mode, non-inverting on OC3A (PE3)
+	//8 prescaler, frequency is 3.90KHz
+  	TCCR3A |= (1<<COM3A1) | (1<<WGM31);
+  	TCCR3B |= (1<<WGM32) | (1<<CS31);
+  	TCCR3C |= 0x00;	//No forced compare	
+  	OCR3A   = 512>>1;	//2^9 = 512, shift one bit to divide by 2
+	//Let's go to Thai Chili
 	
-	/* Config timer 3 */
 }
 
 void IO_config_init(void){
-	DDRE |= (1<<PE3);		//Volume control pin for audio
+	DDRE |= (1<<PE3);	//Volume control pin for audio
 	DDRD |= (1<<PD4);	//Audio out for audio
 	
 	DDRA = 0xFF;		//PortA to all output for 4 digits 7 seg LED
@@ -155,9 +190,14 @@ ISR(TIMER0_OVF_vect){
 		  clear_display();
   			cursor_home();
 		// blinking the mid colon everyone sec
-		if(dot == 0b011)
-			dot = 0b000; // blinking the mid colon
-		else dot = 0b011;
+		if(bit_is_set(dot,0)) { //if dot is 0bx11
+			dot ^= (1UL << 0); // blinking the mid colon
+			dot ^= (1UL << 1);
+		}
+		else dot |= (1<<0)|(1<<1);
+		
+		if(!isAM) toBarGraph = (toBarGraph << 1); 	//PM going down
+		else toBarGraph = (toBarGraph >> 1);		//AM going up
 	}
 	if(count_7ms ==1){		//If 1792ms do something
 		CdSReadStart(); 
@@ -168,6 +208,10 @@ ISR(TIMER0_OVF_vect){
 	
 }//TIMER0_OVF_vect
 
+ISR(TIMER1_COMPA_vect){
+   //Toggle audio output bit
+   PORTD ^= (1UL << 4); 
+}
 
 /* END INTERRUPT ROUTINE LIST*/
 
@@ -221,18 +265,34 @@ void updateSPI(void){
 	PORTE &= ~(0x40);
 	PORTE |=   0x80 ;
 	
-	//SPDR = toBarGraph;              	//send to bar graph display 
-	SPDR = 0x00;
-    	while(bit_is_clear(SPSR, SPIF)){};               //wait till data sent out (a while loop)
+	SPDR = toBarGraph;              	 //send to bar graph display 
+    	while(bit_is_clear(SPSR, SPIF)){};     //wait till data sent out (a while loop)
 	newEncodeData = SPDR;			//Load in new encoder data
 	
 	//Flipping bits for CLK_INH and SH/LD for encoder
 	PORTE |=   0x40;
 	PORTE &= ~(0x80);
 	
-	//bargraphLatch();
+	if(toBarGraph == 0x80 && !isAM){toBarGraph = 1;}	//only for PM
+	if(toBarGraph == 0x00 && isAM){toBarGraph = 0x80;}	//only for AM
+	bargraphLatch();
 }
 
+/***********************************************************************/
+//			bargraphLatch
+// 	latching the data to the output of the bargraph
+/***********************************************************************/
+void bargraphLatch(void){
+	PORTD |= 0x04;         	//HC595 output reg - rising edge...
+	PORTD &= ~0x04;          	//and falling edge	
+}
+
+void processEncoder(volatile uint32_t *time_to_mod, int encoderFlag){
+	if(encoderFlag == 2) 		*time_to_mod = *time_to_mod + 60;
+	else if(encoderFlag == -2)	*time_to_mod = *time_to_mod - 60;
+	else if(encoderFlag == 1)	*time_to_mod = *time_to_mod + 3600;
+	else if(encoderFlag == -1)	*time_to_mod = *time_to_mod - 3600;
+}
 
 /***********************************************************************/
 //update7Segment
@@ -315,43 +375,140 @@ uint16_t second_to_min_hour(uint32_t second, bool mode){
 	return result;
 }
 
+/*
+IsButtonPressed
+Parameter: Button - Take in an number as a button and check the button state if pressed for more than 12 cycle
+Return:	 1 if the button is pressed for 12 cycle
+	 0 if the button is not pressed, or not long enough
+*/
+uint8_t isButtonPressed(uint8_t button){
+	DDRA = 0x00;		//Set port A to all input
+	PORTA = 0xFF;		//Set port A to all pull-ups;
+
+	PORTB |=  (1<<PB4) | (1<<PB5) | (1<<PB6); // Turn on tristate buffer for the button board
+	_delay_us(20);
+	static uint16_t state [8] = {0};	//Fill the array with all 0s
+	state[button] = (state[button] << 1) | (! bit_is_clear(PINA, button)) | 0xE000;	//Debounce 12 cycle
+	if(state[button] == 0xF000) return 1;	//Button is pressed
+	return 0;				//Button is not pressed
+}
+
+/***********************************************************************/
+//                                processButton 
+//	Take in button flag and set the mode of the system
+//	Button 0 switch from normal to alarm setting
+//	Button 1 turn on or turn off the alarm at that specific time 
+//	Button 2 switch between 12 hour mode or 24 hour mode                             
+/***********************************************************************/
+void processButtomNumber(int i){
+	switch(i){
+		case 0: //If state button is pressed
+			if(state == 0) 	state = 1;
+			else if (state == 1) 	state = 0;
+			else if (state == 2) 	snoozing(); 	//while Alarm is firing - snoozing
+			break;
+		case 1: //If alarm button is pressed
+			if(state == 1){ 	//While in alarm setting state, turn on/off the alarm
+				isAlarmSet = !isAlarmSet;
+				if(isAlarmSet) alarm_time = alarm_display_second;
+			}
+			else if(state == 2)	snoozing(); 	//while Alarm is firing - snoozing
+			
+			break;
+		case 2: //If clk_mode buttom is pressed
+			if(state == 0 | state == 1) {	
+				clk_mode = !clk_mode;		// L3 dot on = 24hour type
+				dot ^= 1UL <<2;		//Toggle the L3 dot on the LED display
+			}
+			if(state == 2)		snoozing();	//while Alarm is firing - snoozing
+			break;
+			
+		case 7: //Stop button when ringing
+			if(state == 2){isRinging = 0; state = 0;}	//while Alarm is firing - stop alarm, return to normal
+			break;
+		default: 
+			if(state == 2)		snoozing();
+			break;
+	}
+}
+
+void checkAlarm(void){
+	if(isAlarmSet && (current_second == alarm_time)) { 	// turn volume up if Ringing
+		OCR3A = 200;
+		isRinging = 1;	
+	}
+	else if(isRinging == 1 && (current_second < alarm_time + RINGING_TIME)) //Keep ringing
+		OCR3A = 200;
+	else {								// turn volume down if not ringing
+		OCR3A = 1;
+		isRinging = 0;	
+	}
+}
+
+void snoozing(void){
+	isRinging = 0;
+	alarm_time = alarm_time + SNOOZE_TIME;
+	state = 0;
+}
+
 int main() {
 	int flag=0;
-	int state=0;
-	bool isAlarmSet=0;
+	char lcd_final0[32] = "Alarm is armed                  ";
+	char lcd_final1[32] = "I am in case 1                  ";
 	
 	//Setup
 	spi_init();
-	clock_config_init();
 	IO_config_init();
+	clock_config_init();
 	ADC_init();
 	IO_config_init();
 	lcd_init(); 
 	clear_display();
 	sei();			//Enable all interrupts
+	/*Default value when start up*/
+	alarm_display_second = 43200;	//Alarm time setting will display noon
+	
 	//Loop
+	
 	
 	/* Testing code */
 	current_second = 0;
 	dot = 0b011; // turn on the 4_LED_7_seg mid colon
 	clk_mode = 1;
+
 	/* Testing code */
-	
+	OCR3A = 0;
 	while(1){
-		update7Segment(second_to_min_hour(current_second, clk_mode), dot); // turn on L1 and L2 also
-		//update7Segment(lastADCread, dot);
-		updateSPI();
-		flag =  dirOfEncoder();
 		
-		if(flag == 2) current_second += 60;
+		updateSPI();	//Read encoder value + update bar graph to indicate am or pm
+		if(isAlarmSet) refresh_lcd(lcd_final0);
 		
-		switch(state){	//State 0 Normal time with/without Alarm, State 1 setting time for alarm
-			case 1:
+
+		switch(state){	
+			case 0: //State 0 Normal time with/without Alarm
+				update7Segment(second_to_min_hour(current_second, clk_mode), dot); // turn on L1 and L2 also
+				processEncoder(&current_second, dirOfEncoder());
+				if(current_second < 43200) isAM = 1;
+				else isAM = 0;
+				checkAlarm();
+				if(isRinging) state = 2;	//If alarm trigged, move to state 2
 				break;
 			
-			case 0:
+			case 1: //State 1 setting time for alarm		
+				update7Segment(second_to_min_hour(alarm_display_second, clk_mode), dot); // turn on L1 and L2 also
+				processEncoder(&alarm_display_second, dirOfEncoder());
+				if(alarm_display_second < 43200) isAM = 1;
+				else isAM = 0;
+				break;
+			case 2: //State 2 Alarm is firing
+				update7Segment(second_to_min_hour(current_second, clk_mode), dot); // turn on L1 and L2 also
 				break;		
 		}
+		
+		for(i=0; i<8; i++){
+			if(isButtonPressed(i)) processButtomNumber(i);
+		}
+		
 
 		
 
