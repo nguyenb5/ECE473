@@ -43,7 +43,10 @@
 #include "hd44780.h"
 #include "twi_master.h"
 #include "lm73_functions.h"
-//#include "si4734.h"
+#include "si4734.h"
+
+#define TRUE 1
+#define FALSE 0
 
 #define RINGING_TIME 60
 #define SNOOZE_TIME 10 
@@ -77,6 +80,8 @@ bool isSnoozing = 0;
 char lcd_final[32];
 
 /* Radio Global Vars*/
+bool isRadioChange = 0;			//default to no change
+bool applyRadioChange = 0;		//default to do nothing 
 bool isRadioOn;
 extern enum radio_band{FM, AM, SW};
 extern volatile uint8_t STC_interrupt;
@@ -88,10 +93,11 @@ uint16_t eeprom_am_freq;
 uint16_t eeprom_sw_freq;
 uint8_t  eeprom_volume;
 
+uint16_t desired_fm_freq = 10630;
 uint16_t current_fm_freq = 10630;
 uint16_t current_am_freq;
 uint16_t current_sw_freq;
-uint8_t  current_volume;
+uint8_t  current_volume = 50;		//Default 50% volume
 
 /* Temperature Sensor TWI variable*/
 extern uint8_t lm73_wr_buf[2];
@@ -135,6 +141,8 @@ void processButton(void);
 /* Audio stuff */
 void checkAlarm(void);
 void SET_VOLUME(uint8_t percent);
+void inline TONE_ON(void)	{TIMSK |= (1<<OCIE1A);}				//Allow Atmega to enable tone generator
+void inline TONE_OFF(void)	{TIMSK &= ~(1UL << OCIE1A);}	//Disable Atmega tone generator TIMSK  |= (1<<OCIE1A)
 void snoozing(void);
 
 /* Temperature Sensor stuff */
@@ -146,6 +154,7 @@ void radio_init(void);
 void radio_reset(void);
 void inline RADIO_ON(void){set_property(0x4000, 0x003F); isRadioOn = 1;}	//Max radio volume output is 3F, min 0
 void inline RADIO_OFF(void){set_property(0x4000, 0x0000); isRadioOn = 0;}	//This shut of the output of the radio within the IC
+void processRadioTune(void);
 
 
 void spi_init(void){
@@ -243,6 +252,15 @@ void radio_reset(void){
 	DDRE  &= ~(0x80);   //now Port E bit 7 becomes input from the radio interrupt
 }
 
+void processRadioTune(void){
+	if((desired_fm_freq != current_fm_freq) && applyRadioChange == TRUE){
+		current_fm_freq = desired_fm_freq; 
+		fm_tune_freq();
+		SET_VOLUME(current_volume);
+		applyRadioChange = FALSE;
+	}
+}
+
 /***********************************************************************/
 //			CdSReadStart
 //			Start ADC conversion
@@ -306,6 +324,10 @@ ISR(TIMER0_OVF_vect){
 	} 
 	if((count_7ms % 32) ==0){	//if 0.25 sec doing something
 		processLEDbrightness(lastADCread);
+		if(isRadioChange == TRUE) {
+			isRadioChange = FALSE;
+			applyRadioChange = TRUE;
+		}
 	}
 	
 }//TIMER0_OVF_vect
@@ -412,10 +434,19 @@ void bargraphLatch(void){
 }
 
 void processEncoder(volatile uint32_t *time_to_mod, int encoderFlag){
-	if(encoderFlag == 2) 		*time_to_mod = *time_to_mod + 60;
-	else if(encoderFlag == -2)	*time_to_mod = *time_to_mod - 60;
-	else if(encoderFlag == 1)	*time_to_mod = *time_to_mod + 3600;
-	else if(encoderFlag == -1)	*time_to_mod = *time_to_mod - 3600;
+	if(state == 0 | state ==1){
+		if(encoderFlag == 2) 		*time_to_mod = *time_to_mod + 60;
+		else if(encoderFlag == -2)	*time_to_mod = *time_to_mod - 60;
+		else if(encoderFlag == 1)	*time_to_mod = *time_to_mod + 3600;
+		else if(encoderFlag == -1)	*time_to_mod = *time_to_mod - 3600;
+	}
+	if(state == 3){	//Allow freq selection and volume adjustment
+		uint16_t temp = *time_to_mod;		//cant seem to compare *time_to_mod directly
+		if(encoderFlag == 2 && temp <10800)			{	*time_to_mod = *time_to_mod + 20;	isRadioChange = TRUE;}
+		else if(encoderFlag == -2 && temp > 8800)		{	*time_to_mod = *time_to_mod - 20;	isRadioChange = TRUE;}
+		else if(encoderFlag == 1 && current_volume < 100)	{	current_volume += 5;			isRadioChange = TRUE;}
+		else if(encoderFlag == -1 && current_volume > 0)	{	current_volume -= 5;			isRadioChange = TRUE;}
+	}
 }
 
 /***********************************************************************/
@@ -537,7 +568,9 @@ void processButtomNumber(int i){
 			case 2:
 				clk_mode = !clk_mode;	// L3 dot on = 24hour type
 				dot ^= 1UL << 2;				//Toggle the L3 dot on the LED display
-				break;
+				break; 
+			case 4:		//Radio tune button
+				state = 3;
 		}
 	}
 	else if(state == 1){	//Setting alarm time
@@ -567,19 +600,37 @@ void processButtomNumber(int i){
 				snoozing();
 		}	
 	}
+	else if(state == 3){ //Radio tune button
+		switch(i){
+			case 4:
+				state = 0;
+				break;
+		}
+		//Turn on radio and start tuning ?
+	}
 	
 }
 
-//////REWRITE NOT DONE
 void checkAlarm(void){
 	if(isAlarmSet && (current_second == alarm_time)) { 	// turn volume up if Ringing
-		OCR3A = 200;
-		isRinging = 1;	
+		isRinging = 1;
+			if(alarm_mode == JUST_TONE) TONE_ON();
+			if(alarm_mode == JUST_RADIO & isRadioOn == 0) {	//over sending I2C line will kill the system
+				RADIO_ON();
+				isRadioOn = 1;
+			}
+		SET_VOLUME(current_volume);
 	}
 	else if(isRinging == 1 && (current_second < alarm_time + RINGING_TIME)) //Keep ringing
-		OCR3A = 200;
+		SET_VOLUME(current_volume);
 	else {								// turn volume down if not ringing
-		OCR3A = 1;
+		SET_VOLUME(0);
+		TONE_OFF();
+			if(isRadioOn){		//over sending I2C will kill the system
+				RADIO_OFF();
+				isRadioOn = 0;
+				SET_VOLUME(0);
+			}
 		isRinging = 0;	
 	}
 }
@@ -590,7 +641,7 @@ void SET_VOLUME(uint8_t percent){
 
 void snoozing(void){
 	isRinging = 0;
-	alarm_time = alarm_time + SNOOZE_TIME;
+	alarm_time = current_second + SNOOZE_TIME;
 	state = 0;
 }
 
@@ -666,23 +717,31 @@ int main() {
 	clear_display();
 	sei();			//Enable all interrupts
 	
-	/*Default value when start up*/
+	/* Default value for radio*/
+	fm_pwr_up();
+	desired_fm_freq = 10630;
+	current_fm_freq = 10630; 
+	fm_tune_freq(); //tune radio freq to current_fm_freq
+	
+	RADIO_OFF();
+	/*Default value when start up for alarm*/
 	alarm_display_second = 43200;	//Alarm time setting will display noon
 	current_second = 0;
+
 
 	while(1){
 		
 		updateSPI();	//Read encoder value + update bar graph to indicate am or pm
 		
 		updateDisplay();
-		
+			
 		switch(state){	
 			case 0: //State 0 Normal time with/without Alarm
 				update7Segment(second_to_min_hour(&current_second, clk_mode), dot); // turn on L1 and L2 also
 				processEncoder(&current_second, dirOfEncoder());
 				if(current_second < 43200) isAM = 1;
 				else isAM = 0;
-				checkAlarm();
+				checkAlarm();	//Take care of turning off the RADIO
 				if(isRinging) state = 2;	//If alarm trigged, move to state 2
 				break;
 			
@@ -694,12 +753,24 @@ int main() {
 				break;
 			case 2: //State 2 Alarm is firing
 				update7Segment(second_to_min_hour(&current_second, clk_mode), dot); // turn on L1 and L2 also
-				break;		
+				break;
+			case 3: //Adjusting radio
+				if(isRadioOn = 0);{
+					RADIO_ON();
+					SET_VOLUME(current_volume);
+				}
+				update7Segment(desired_fm_freq/10, 0);
+				//update7Segment(current_volume,0);
+				processEncoder(&desired_fm_freq, dirOfEncoder());
+				processRadioTune();
+				break;
 		}
 		
 		for(i=0; i<8; i++){
 			if(isButtonPressed(i)) processButtomNumber(i);
 		}
+		//Radio stuff here
+		
 		
   } //while
 	} //main
